@@ -189,6 +189,8 @@ typedef struct {
 	int y;
 } CanvasOffset;
 
+#define MAX_CANVAS_TAGS 31
+
 struct Monitor {
 	struct wl_list link;
 	struct wlr_output *wlr_output;
@@ -206,7 +208,7 @@ struct Monitor {
 	unsigned int seltags;
 	unsigned int sellt;
 	uint32_t tagset[2];
-	CanvasOffset canvas[TAGCOUNT];
+	CanvasOffset canvas[MAX_CANVAS_TAGS];
 	float mfact;
 	int gamma_lut_changed;
 	int nmaster;
