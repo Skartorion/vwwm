@@ -2624,6 +2624,8 @@ setfullscreen(Client *c, int fullscreen)
 void
 setlayout(const Arg *arg)
 {
+	Client *c;
+
 	if (!selmon)
 		return;
 	if (!arg || !arg->v || arg->v != selmon->lt[selmon->sellt])
@@ -2631,6 +2633,19 @@ setlayout(const Arg *arg)
 	if (arg && arg->v)
 		selmon->lt[selmon->sellt] = (Layout *)arg->v;
 	strncpy(selmon->ltsymbol, selmon->lt[selmon->sellt]->symbol, LENGTH(selmon->ltsymbol));
+
+	/* Optional vxwm-like behavior: floating layout floats all windows */
+	if (float_layout_floats_windows && !selmon->lt[selmon->sellt]->arrange) {
+		wl_list_for_each(c, &clients, link) {
+			Client *p;
+			if (!VISIBLEON(c, selmon) || c->isfullscreen)
+				continue;
+			c->isfloating = 1;
+			p = client_get_parent(c);
+			wlr_scene_node_reparent(&c->scene->node, layers[(p && p->isfullscreen) ? LyrFS : LyrFloat]);
+		}
+	}
+
 	arrange(selmon);
 	printstatus();
 }
