@@ -185,6 +185,8 @@ static const Key keys[] = {
 };
 
 static const Button buttons[] = {
+	/* Drag to pan the infinite canvas (floating layout only); .f is speed multiplier */
+	{ MODKEY|WLR_MODIFIER_SHIFT, BTN_LEFT, movecanvasmouse, {.f = 1.0f} },
 	{ MODKEY, BTN_LEFT,   moveresize,     {.ui = CurMove} },
 	{ MODKEY, BTN_MIDDLE, togglefloating, {0} },
 	{ MODKEY, BTN_RIGHT,  moveresize,     {.ui = CurResize} },

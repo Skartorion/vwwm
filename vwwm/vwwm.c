@@ -83,7 +83,7 @@
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
 
 /* enums */
-enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
+enum { CurNormal, CurPressed, CurMove, CurResize, CurCanvas }; /* cursor */
 enum { XDGShell, LayerShell, X11 }; /* client types */
 enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS }; /* scene layers */
 
@@ -140,6 +140,9 @@ typedef struct {
 	uint32_t tags;
 	int isfloating, isurgent, isfullscreen;
 	uint32_t resize; /* configure serial of a pending resize */
+	int saved_canvas_x, saved_canvas_y;
+	int saved_canvas_w, saved_canvas_h;
+	int was_on_canvas;
 } Client;
 
 typedef struct {
@@ -185,8 +188,8 @@ typedef struct {
 } Layout;
 
 typedef struct {
-	int x;
-	int y;
+	int x, y;
+	int saved_x, saved_y;
 } CanvasOffset;
 
 #define MAX_CANVAS_TAGS 31
@@ -302,6 +305,10 @@ static void handlesig(int signo);
 static void homecanvas(const Arg *arg);
 static void incnmaster(const Arg *arg);
 static int getcurrenttag(Monitor *m);
+static int clientontag(Client *c, Monitor *m, int tagidx);
+static void save_canvas_positions(Monitor *m);
+static void restore_canvas_positions(Monitor *m);
+static void floatlayoutclients(Monitor *m);
 static void inputdevice(struct wl_listener *listener, void *data);
 static int keybinding(uint32_t mods, xkb_keysym_t sym);
 static void keypress(struct wl_listener *listener, void *data);
@@ -313,6 +320,8 @@ static void mapnotify(struct wl_listener *listener, void *data);
 static void maximizenotify(struct wl_listener *listener, void *data);
 static void monocle(Monitor *m);
 static void movecanvas(const Arg *arg);
+static void movecanvasmouse(const Arg *arg);
+static void translate_canvas(Monitor *m, int dx, int dy);
 static void motionabsolute(struct wl_listener *listener, void *data);
 static void motionnotify(uint32_t time, struct wlr_input_device *device, double sx,
 		double sy, double sx_unaccel, double sy_unaccel);
@@ -416,6 +425,8 @@ static KeyboardGroup *kb_group;
 static unsigned int cursor_mode;
 static Client *grabc;
 static int grabcx, grabcy; /* client-relative */
+static float canvas_mult = 1.0f;
+static float canvas_accum_x, canvas_accum_y;
 
 static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
@@ -672,11 +683,13 @@ buttonpress(struct wl_listener *listener, void *data)
 		/* TODO: should reset to the pointer focus's current setcursor */
 		if (!locked && cursor_mode != CurNormal && cursor_mode != CurPressed) {
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+			if (cursor_mode == CurMove || cursor_mode == CurResize) {
+				/* Drop the window off on its new monitor */
+				selmon = xytomon(cursor->x, cursor->y);
+				setmon(grabc, selmon, 0);
+				grabc = NULL;
+			}
 			cursor_mode = CurNormal;
-			/* Drop the window off on its new monitor */
-			selmon = xytomon(cursor->x, cursor->y);
-			setmon(grabc, selmon, 0);
-			grabc = NULL;
 			return;
 		}
 		cursor_mode = CurNormal;
@@ -1712,12 +1725,119 @@ getcurrenttag(Monitor *m)
 	return i < TAGCOUNT ? (int)i : 0;
 }
 
+static int
+clientontag(Client *c, Monitor *m, int tagidx)
+{
+	return c->mon == m && tagidx >= 0 && tagidx < TAGCOUNT
+		&& (c->tags & (1u << tagidx));
+}
+
+static void
+save_canvas_positions(Monitor *m)
+{
+	Client *c;
+	int tagidx;
+
+	if (!m || m->lt[m->sellt]->arrange)
+		return;
+
+	tagidx = getcurrenttag(m);
+	m->canvas[tagidx].saved_x = m->canvas[tagidx].x;
+	m->canvas[tagidx].saved_y = m->canvas[tagidx].y;
+
+	wl_list_for_each(c, &clients, link) {
+		if (!VISIBLEON(c, m))
+			continue;
+		c->saved_canvas_x = c->geom.x + m->canvas[tagidx].x;
+		c->saved_canvas_y = c->geom.y + m->canvas[tagidx].y;
+		c->saved_canvas_w = c->geom.width;
+		c->saved_canvas_h = c->geom.height;
+		c->was_on_canvas = 1;
+	}
+}
+
+static void
+restore_canvas_positions(Monitor *m)
+{
+	Client *c;
+	int tagidx;
+	struct wlr_box geo;
+
+	if (!m || m->lt[m->sellt]->arrange)
+		return;
+
+	tagidx = getcurrenttag(m);
+	m->canvas[tagidx].x = m->canvas[tagidx].saved_x;
+	m->canvas[tagidx].y = m->canvas[tagidx].saved_y;
+
+	wl_list_for_each(c, &clients, link) {
+		if (!VISIBLEON(c, m) || !c->was_on_canvas || c->isfullscreen)
+			continue;
+		c->isfloating = 1;
+		geo.x = c->saved_canvas_x - m->canvas[tagidx].x;
+		geo.y = c->saved_canvas_y - m->canvas[tagidx].y;
+		geo.width = c->saved_canvas_w;
+		geo.height = c->saved_canvas_h;
+		resize(c, geo, 0);
+	}
+}
+
+static void
+floatlayoutclients(Monitor *m)
+{
+	Client *c;
+
+	if (!m || m->lt[m->sellt]->arrange)
+		return;
+
+	wl_list_for_each(c, &clients, link) {
+		if (VISIBLEON(c, m) && !c->isfullscreen)
+			c->isfloating = 1;
+	}
+}
+
 static void
 positionclient(Client *c)
 {
 	if (!c || !c->mon || !client_surface(c)->mapped)
 		return;
 	wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
+}
+
+static void
+translate_canvas(Monitor *m, int dx, int dy)
+{
+	Client *c;
+	int tagidx;
+
+	if (!m || (!dx && !dy) || m->lt[m->sellt]->arrange)
+		return;
+
+	tagidx = getcurrenttag(m);
+	m->canvas[tagidx].x -= dx;
+	m->canvas[tagidx].y -= dy;
+
+	wl_list_for_each(c, &clients, link) {
+		if (!clientontag(c, m, tagidx))
+			continue;
+		c->geom.x -= dx;
+		c->geom.y -= dy;
+		positionclient(c);
+	}
+}
+
+static void
+movecanvasmouse(const Arg *arg)
+{
+	if (!selmon || selmon->lt[selmon->sellt]->arrange)
+		return;
+	if (focustop(selmon) && focustop(selmon)->isfullscreen)
+		return;
+
+	canvas_mult = (arg && arg->f) ? arg->f : 1.0f;
+	canvas_accum_x = canvas_accum_y = 0.0f;
+	cursor_mode = CurCanvas;
+	wlr_cursor_set_xcursor(cursor, cursor_mgr, "all-scroll");
 }
 
 static void
@@ -1739,7 +1859,7 @@ homecanvas(const Arg *arg)
 		return;
 
 	wl_list_for_each(c, &clients, link) {
-		if (!VISIBLEON(c, selmon))
+		if (!clientontag(c, selmon, tagidx))
 			continue;
 		c->geom.x -= dx;
 		c->geom.y -= dy;
@@ -1754,8 +1874,7 @@ homecanvas(const Arg *arg)
 static void
 movecanvas(const Arg *arg)
 {
-	Client *c;
-	int tagidx, dx = 0, dy = 0;
+	int dx = 0, dy = 0;
 
 	if (!selmon || !arg || selmon->lt[selmon->sellt]->arrange)
 		return;
@@ -1770,18 +1889,7 @@ movecanvas(const Arg *arg)
 	default: return;
 	}
 
-	tagidx = getcurrenttag(selmon);
-	selmon->canvas[tagidx].x -= dx;
-	selmon->canvas[tagidx].y -= dy;
-
-	wl_list_for_each(c, &clients, link) {
-		if (!VISIBLEON(c, selmon))
-			continue;
-		c->geom.x -= dx;
-		c->geom.y -= dy;
-		positionclient(c);
-	}
-
+	translate_canvas(selmon, dx, dy);
 	printstatus();
 }
 
@@ -2043,6 +2151,11 @@ mapnotify(struct wl_listener *listener, void *data)
 	} else {
 		applyrules(c);
 	}
+	if (c->mon && float_layout_floats_windows && !c->mon->lt[c->mon->sellt]->arrange
+			&& !c->isfullscreen && !client_is_unmanaged(c))
+		c->isfloating = 1;
+	if (c->mon)
+		arrange(c->mon);
 	printstatus();
 
 unset_fullscreen:
@@ -2140,7 +2253,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
 			cursorconstrain(constraint);
 
-		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
+		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove
+				&& cursor_mode != CurCanvas) {
 			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
 			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
 				sx = cursor->x - c->geom.x - c->bw;
@@ -2176,6 +2290,19 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	} else if (cursor_mode == CurResize) {
 		resize(grabc, (struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y,
 			.width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1);
+		return;
+	} else if (cursor_mode == CurCanvas) {
+		int pdx, pdy;
+
+		canvas_accum_x += (float)dx * canvas_mult;
+		canvas_accum_y += (float)dy * canvas_mult;
+		pdx = (int)canvas_accum_x;
+		pdy = (int)canvas_accum_y;
+		canvas_accum_x -= pdx;
+		canvas_accum_y -= pdy;
+		translate_canvas(selmon, -pdx, -pdy);
+		if (pdx || pdy)
+			printstatus();
 		return;
 	}
 
@@ -2625,25 +2752,29 @@ void
 setlayout(const Arg *arg)
 {
 	Client *c;
+	const Layout *oldlt;
 
 	if (!selmon)
 		return;
+
+	oldlt = selmon->lt[selmon->sellt];
 	if (!arg || !arg->v || arg->v != selmon->lt[selmon->sellt])
 		selmon->sellt ^= 1;
 	if (arg && arg->v)
 		selmon->lt[selmon->sellt] = (Layout *)arg->v;
 	strncpy(selmon->ltsymbol, selmon->lt[selmon->sellt]->symbol, LENGTH(selmon->ltsymbol));
 
-	/* Optional vxwm-like behavior: floating layout floats all windows */
-	if (float_layout_floats_windows && !selmon->lt[selmon->sellt]->arrange) {
+	if (!oldlt->arrange && selmon->lt[selmon->sellt]->arrange) {
+		save_canvas_positions(selmon);
+		homecanvas(NULL);
 		wl_list_for_each(c, &clients, link) {
-			Client *p;
-			if (!VISIBLEON(c, selmon) || c->isfullscreen)
-				continue;
-			c->isfloating = 1;
-			p = client_get_parent(c);
-			wlr_scene_node_reparent(&c->scene->node, layers[(p && p->isfullscreen) ? LyrFS : LyrFloat]);
+			if (c->mon == selmon && VISIBLEON(c, selmon) && !c->isfullscreen)
+				c->isfloating = 0;
 		}
+	} else if (!selmon->lt[selmon->sellt]->arrange) {
+		restore_canvas_positions(selmon);
+		if (float_layout_floats_windows)
+			floatlayoutclients(selmon);
 	}
 
 	arrange(selmon);
@@ -3072,7 +3203,21 @@ toggleview(const Arg *arg)
 	if (!(newtagset = selmon ? selmon->tagset[selmon->seltags] ^ (arg->ui & TAGMASK) : 0))
 		return;
 
+	if (!selmon->lt[selmon->sellt]->arrange)
+		save_canvas_positions(selmon);
+
 	selmon->tagset[selmon->seltags] = newtagset;
+
+	if (selmon->lt[selmon->sellt]->arrange) {
+		int newtag = getcurrenttag(selmon);
+		selmon->canvas[newtag].x = 0;
+		selmon->canvas[newtag].y = 0;
+	} else {
+		restore_canvas_positions(selmon);
+		if (float_layout_floats_windows)
+			floatlayoutclients(selmon);
+	}
+
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
 	printstatus();
@@ -3120,6 +3265,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		wl_list_remove(&c->link);
 		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);
+		c->was_on_canvas = 0;
 	}
 
 	wlr_scene_node_destroy(&c->scene->node);
@@ -3262,9 +3408,24 @@ view(const Arg *arg)
 {
 	if (!selmon || (arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
 		return;
+
+	if (!selmon->lt[selmon->sellt]->arrange)
+		save_canvas_positions(selmon);
+
 	selmon->seltags ^= 1; /* toggle sel tagset */
 	if (arg->ui & TAGMASK)
 		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
+
+	if (selmon->lt[selmon->sellt]->arrange) {
+		int newtag = getcurrenttag(selmon);
+		selmon->canvas[newtag].x = 0;
+		selmon->canvas[newtag].y = 0;
+	} else {
+		restore_canvas_positions(selmon);
+		if (float_layout_floats_windows)
+			floatlayoutclients(selmon);
+	}
+
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
 	printstatus();
