@@ -1,2 +1,2 @@
 # vwwm
-Мега супер кул вм проджект
+Versatile Wayland Window Manager
