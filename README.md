@@ -17,7 +17,6 @@
 
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)
 ![Language](https://img.shields.io/badge/language-C-informational?style=flat-square)
-![Wayland](https://img.shields.io/badge/wayland-compositor-orange?style=flat-square)
 ![wlroots](https://img.shields.io/badge/wlroots-0.19-blueviolet?style=flat-square)
 ![Version](https://img.shields.io/badge/version-0.8--dev-green?style=flat-square)
 
