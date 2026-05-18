@@ -7,6 +7,8 @@
 static const int sloppyfocus               = 1;  /* focus follows mouse */
 static const int bypass_surface_visibility = 0;  /* 1 means idle inhibitors will disable idle tracking even if it's surface isn't visible  */
 static const unsigned int borderpx         = 1;  /* border pixel of windows */
+static const unsigned int minwinw         = 25; /* minimum outer window width */
+static const unsigned int minwinh         = 15; /* minimum outer window height */
 static const unsigned int gappx           = 5;  /* gaps between tiled windows */
 static const int float_layout_floats_windows = 1; /* make floating layout actually float everything */
 static const float rootcolor[]             = COLOR(0x222222ff);
@@ -21,6 +23,7 @@ static const float fullscreen_bg[]         = {0.0f, 0.0f, 0.0f, 1.0f}; /* You ca
 
 /* infinite canvas */
 static const int canvasstep = 120;
+static const float canvaszoomstep = 0.08f; /* scale factor per wheel notch (0.08 = 8%) */
 
 /* logging */
 static int log_level = WLR_ERROR;
@@ -107,8 +110,9 @@ LIBINPUT_CONFIG_TAP_MAP_LMR -- 1/2/3 finger tap maps to left/middle/right
 */
 static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
 
-/* If you want to use the windows key for MODKEY, use WLR_MODIFIER_LOGO */
-#define MODKEY WLR_MODIFIER_ALT
+/* If you want to use the windows key for MODKEY, use WLR_MODIFIER_LOGO.
+ * Avoid WLR_MODIFIER_CAPS unless you intend to use Caps Lock as the mod key. */
+#define MODKEY WLR_MODIFIER_CAPS
 
 #define TAGKEYS(KEY,SKEY,TAG) \
 	{ MODKEY,                    KEY,            view,            {.ui = 1 << TAG} }, \
@@ -186,7 +190,8 @@ static const Key keys[] = {
 
 static const Button buttons[] = {
 	/* Drag to pan the infinite canvas (floating layout only); .f is speed multiplier */
-	{ MODKEY|WLR_MODIFIER_SHIFT, BTN_LEFT, movecanvasmouse, {.f = 1.0f} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, BTN_LEFT,   movecanvasmouse, {.f = 1.0f} },
+	{ 0,                          BTN_MIDDLE, movecanvasmouse, {.f = 1.0f} },
 	{ MODKEY, BTN_LEFT,   moveresize,     {.ui = CurMove} },
 	{ MODKEY, BTN_MIDDLE, togglefloating, {0} },
 	{ MODKEY, BTN_RIGHT,  moveresize,     {.ui = CurResize} },

@@ -12,6 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
+#include <wayland-server-protocol.h>
 #include <wlr/backend.h>
 #include <wlr/backend/libinput.h>
 #include <wlr/render/allocator.h>
@@ -74,7 +75,6 @@
 /* macros */
 #define MAX(A, B)               ((A) > (B) ? (A) : (B))
 #define MIN(A, B)               ((A) < (B) ? (A) : (B))
-#define CLEANMASK(mask)         (mask & ~WLR_MODIFIER_CAPS)
 #define VISIBLEON(C, M)         ((M) && (C)->mon == (M) && ((C)->tags & (M)->tagset[(M)->seltags]))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
 #define END(A)                  ((A) + LENGTH(A))
@@ -321,6 +321,7 @@ static void maximizenotify(struct wl_listener *listener, void *data);
 static void monocle(Monitor *m);
 static void movecanvas(const Arg *arg);
 static void movecanvasmouse(const Arg *arg);
+static void canvaszoom(int direction);
 static void translate_canvas(Monitor *m, int dx, int dy);
 static void motionabsolute(struct wl_listener *listener, void *data);
 static void motionnotify(uint32_t time, struct wlr_input_device *device, double sx,
@@ -479,17 +480,24 @@ static struct wlr_xwayland *xwayland;
 /* configuration, allows nested code to access above variables */
 #include "config.h"
 
+/* Ignore Caps Lock for bindings unless Caps *is* MODKEY (see dwl #466). */
+#define CLEANMASK(mask) \
+	((mask) & ~((MODKEY) == WLR_MODIFIER_CAPS ? 0 : WLR_MODIFIER_CAPS))
+
 /* attempt to encapsulate suck into one file */
 #include "client.h"
+
+static void
+clampgeommin(struct wlr_box *geo)
+{
+	geo->width = MAX((int)minwinw, geo->width);
+	geo->height = MAX((int)minwinh, geo->height);
+}
 
 /* function implementations */
 void
 applybounds(Client *c, struct wlr_box *bbox)
 {
-	/* set minimum possible */
-	c->geom.width = MAX(1 + 2 * (int)c->bw, c->geom.width);
-	c->geom.height = MAX(1 + 2 * (int)c->bw, c->geom.height);
-
 	if (c->geom.x >= bbox->x + bbox->width)
 		c->geom.x = bbox->x + bbox->width - c->geom.width;
 	if (c->geom.y >= bbox->y + bbox->height)
@@ -636,9 +644,28 @@ axisnotify(struct wl_listener *listener, void *data)
 	/* This event is forwarded by the cursor when a pointer emits an axis event,
 	 * for example when you move the scroll wheel. */
 	struct wlr_pointer_axis_event *event = data;
+	int zoomdir = 0;
+
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
-	/* TODO: allow usage of scroll wheel for mousebindings, it can be implemented
-	 * by checking the event's orientation and the delta of the event */
+
+	/* Canvas zoom in floating layout: wheel up = zoom in, wheel down = zoom out */
+	if (!locked && selmon && !selmon->lt[selmon->sellt]->arrange
+			&& event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
+		if (event->delta_discrete < 0)
+			zoomdir = +1;
+		else if (event->delta_discrete > 0)
+			zoomdir = -1;
+		else if (event->delta < 0)
+			zoomdir = +1;
+		else if (event->delta > 0)
+			zoomdir = -1;
+	}
+	if (zoomdir && cursor_mode != CurMove && cursor_mode != CurResize
+			&& cursor_mode != CurCanvas) {
+		canvaszoom(zoomdir);
+		return;
+	}
+
 	/* Notify the client with pointer focus of the axis event. */
 	wlr_seat_pointer_notify_axis(seat,
 			event->time_msec, event->orientation, event->delta,
@@ -1829,6 +1856,8 @@ translate_canvas(Monitor *m, int dx, int dy)
 static void
 movecanvasmouse(const Arg *arg)
 {
+	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+		return;
 	if (!selmon || selmon->lt[selmon->sellt]->arrange)
 		return;
 	if (focustop(selmon) && focustop(selmon)->isfullscreen)
@@ -1838,6 +1867,42 @@ movecanvasmouse(const Arg *arg)
 	canvas_accum_x = canvas_accum_y = 0.0f;
 	cursor_mode = CurCanvas;
 	wlr_cursor_set_xcursor(cursor, cursor_mgr, "all-scroll");
+}
+
+static void
+canvaszoom(int direction)
+{
+	Client *c;
+	int tagidx;
+	double scale;
+	double cx, cy;
+	struct wlr_box geo;
+
+	if (!direction || !selmon || selmon->lt[selmon->sellt]->arrange)
+		return;
+	if (focustop(selmon) && focustop(selmon)->isfullscreen)
+		return;
+
+	tagidx = getcurrenttag(selmon);
+	scale = direction > 0 ? (1.0 + canvaszoomstep) : (1.0 - canvaszoomstep);
+	if (scale <= 0.0)
+		return;
+
+	cx = cursor->x;
+	cy = cursor->y;
+
+	wl_list_for_each(c, &clients, link) {
+		if (!clientontag(c, selmon, tagidx) || c->isfullscreen)
+			continue;
+		geo = c->geom;
+		geo.x = (int)lround(cx + (geo.x - cx) * scale);
+		geo.y = (int)lround(cy + (geo.y - cy) * scale);
+		geo.width = (int)lround(geo.width * scale);
+		geo.height = (int)lround(geo.height * scale);
+		resize(c, geo, 0);
+	}
+
+	printstatus();
 }
 
 static void
@@ -2288,8 +2353,15 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			.width = grabc->geom.width, .height = grabc->geom.height}, 1);
 		return;
 	} else if (cursor_mode == CurResize) {
-		resize(grabc, (struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y,
-			.width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1);
+		int w = (int)round(cursor->x) - grabc->geom.x;
+		int h = (int)round(cursor->y) - grabc->geom.y;
+
+		resize(grabc, (struct wlr_box){
+			.x = grabc->geom.x,
+			.y = grabc->geom.y,
+			.width = MAX((int)minwinw, w),
+			.height = MAX((int)minwinh, h),
+		}, 1);
 		return;
 	} else if (cursor_mode == CurCanvas) {
 		int pdx, pdy;
@@ -2593,6 +2665,8 @@ resize(Client *c, struct wlr_box geo, int interact)
 
 	bbox = interact ? &sgeom : &c->mon->w;
 
+	if (interact || c->isfloating)
+		clampgeommin(&geo);
 	client_set_bounds(c, geo.width, geo.height);
 	c->geom = geo;
 	applybounds(c, bbox);
