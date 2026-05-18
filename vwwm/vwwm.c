@@ -2029,6 +2029,26 @@ inputdevice(struct wl_listener *listener, void *data)
 	wlr_seat_set_capabilities(seat, caps);
 }
 
+static int
+bindingmatch(uint32_t mods, uint32_t bindmod)
+{
+	uint32_t m = CLEANMASK(mods);
+	uint32_t b = CLEANMASK(bindmod);
+
+	/* Bindings that use MODKEY must not fire with only Ctrl/Shift/Alt held. */
+	if ((b & CLEANMASK(MODKEY)) && !(m & CLEANMASK(MODKEY)))
+		return 0;
+	return m == b;
+}
+
+static void
+seat_sync_keyboard(KeyboardGroup *group)
+{
+	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
+	wlr_seat_keyboard_notify_modifiers(seat,
+			&group->wlr_group->keyboard.modifiers);
+}
+
 int
 keybinding(uint32_t mods, xkb_keysym_t sym)
 {
@@ -2039,7 +2059,7 @@ keybinding(uint32_t mods, xkb_keysym_t sym)
 	 */
 	const Key *k;
 	for (k = keys; k < END(keys); k++) {
-		if (CLEANMASK(mods) == CLEANMASK(k->mod)
+		if (bindingmatch(mods, k->mod)
 				&& xkb_keysym_to_lower(sym) == xkb_keysym_to_lower(k->keysym)
 				&& k->func) {
 			k->func(&k->arg);
@@ -2090,8 +2110,8 @@ keypress(struct wl_listener *listener, void *data)
 	if (handled)
 		return;
 
-	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
-	/* Pass unhandled keycodes along to the client. */
+	/* Sync modifiers before each key so clients see Ctrl/Shift state (copy/paste). */
+	seat_sync_keyboard(group);
 	wlr_seat_keyboard_notify_key(seat, event->time_msec,
 			event->keycode, event->state);
 }
@@ -2103,10 +2123,7 @@ keypressmod(struct wl_listener *listener, void *data)
 	 * pressed. We simply communicate this to the client. */
 	KeyboardGroup *group = wl_container_of(listener, group, modifiers);
 
-	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
-	/* Send modifiers to the client. */
-	wlr_seat_keyboard_notify_modifiers(seat,
-			&group->wlr_group->keyboard.modifiers);
+	seat_sync_keyboard(group);
 }
 
 int

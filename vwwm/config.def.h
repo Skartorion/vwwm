@@ -110,9 +110,10 @@ LIBINPUT_CONFIG_TAP_MAP_LMR -- 1/2/3 finger tap maps to left/middle/right
 */
 static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
 
-/* If you want to use the windows key for MODKEY, use WLR_MODIFIER_LOGO.
- * Avoid WLR_MODIFIER_CAPS unless you intend to use Caps Lock as the mod key. */
-#define MODKEY WLR_MODIFIER_CAPS
+/* Compositor mod key: Alt (default), Super (WLR_MODIFIER_LOGO), etc.
+ * Do NOT use WLR_MODIFIER_CAPS unless you want Caps Lock as the mod key;
+ * it breaks Ctrl+Shift shortcuts in terminals when Caps Lock is toggled on. */
+#define MODKEY WLR_MODIFIER_ALT
 
 #define TAGKEYS(KEY,SKEY,TAG) \
 	{ MODKEY,                    KEY,            view,            {.ui = 1 << TAG} }, \
