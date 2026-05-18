@@ -2030,12 +2030,26 @@ inputdevice(struct wl_listener *listener, void *data)
 }
 
 static int
+compositor_mods_active(uint32_t mods)
+{
+	uint32_t m = CLEANMASK(mods);
+
+	/* Normal compositor shortcuts use MODKEY (Alt by default). */
+	if (m & CLEANMASK(MODKEY))
+		return 1;
+	/* Ctrl+Alt without MODKEY: CHVT, Ctrl+Alt+Backspace quit. */
+	if ((m & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT))
+			== (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT))
+		return 1;
+	return 0;
+}
+
+static int
 bindingmatch(uint32_t mods, uint32_t bindmod)
 {
 	uint32_t m = CLEANMASK(mods);
 	uint32_t b = CLEANMASK(bindmod);
 
-	/* Bindings that use MODKEY must not fire with only Ctrl/Shift/Alt held. */
 	if ((b & CLEANMASK(MODKEY)) && !(m & CLEANMASK(MODKEY)))
 		return 0;
 	return m == b;
@@ -2089,11 +2103,21 @@ keypress(struct wl_listener *listener, void *data)
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
-	/* On _press_ if there is no active screen locker,
-	 * attempt to process a compositor keybinding. */
-	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		for (i = 0; i < nsyms; i++)
-			handled = keybinding(mods, syms[i]) || handled;
+	/* Only check compositor binds when MODKEY (or Ctrl+Alt) is held so
+	 * Ctrl+Shift+C and other client shortcuts are never intercepted. */
+	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED
+			&& compositor_mods_active(mods)) {
+		xkb_keysym_t sym = xkb_state_key_get_one_sym(
+				group->wlr_group->keyboard.xkb_state, keycode);
+
+		if (sym != XKB_KEY_NoSymbol)
+			handled = keybinding(mods, sym);
+		else
+			for (i = 0; i < nsyms; i++) {
+				if (syms[i] < 0x20)
+					continue;
+				handled = keybinding(mods, syms[i]) || handled;
+			}
 	}
 
 	if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
